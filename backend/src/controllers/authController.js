@@ -4,12 +4,15 @@ const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const userModel = require("../models/userModel");
 const sessionModel = require("../models/session.model");
-
+const { sendEmail } = require("../services/email.service");
+const OTPModel = require("../models/otp.model");
+const {generateOTP, getOTPHtml} = require("../utils/utils");
+require('dotenv').config();
 
 const registerUser = async (req, res) => {
-    const { username, password, phone, dob, gender } = req.body;
+    const { email, username, password, phone, dob, gender } = req.body;
 
-    if (!username || !password || !phone || !dob || !gender) {
+    if (!email || !username || !password || !phone || !dob || !gender) {
         return res.status(400).json({ message: "All fields are required" });
     }
 
@@ -38,11 +41,23 @@ const registerUser = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = await userModel.create({
+        email,
         username,
         password: hashedPassword,
         phone,
         dob,
         gender
+    });
+
+    const otp = generateOTP();
+    const html = getOTPHtml(otp);
+
+    const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+
+    await OTPModel.create({
+        email,
+        user: user._id,
+        otpHash
     });
 
     const refreshToken = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
@@ -66,21 +81,31 @@ const registerUser = async (req, res) => {
         maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
     });
 
+    await sendEmail(
+        email,
+        "Verify your Anirate account",
+        `Thank you for registering on Anirate. Your OTP is ${otp}. Use it to verify your email account.`,
+        html
+    );
+
     res.status(201).json({
         message: "User registered successfully",
-        user: { username: user.username, phone: user.phone, dob: user.dob, gender: user.gender },
-        accessToken,
+        user: { email: user.email, username: user.username, phone: user.phone, dob: user.dob, gender: user.gender, verified: user.verified }
     });
 }
 
 const loginUser = async (req, res) => {
 
-    const { username, password } = req.body;
+    const { email, username, password } = req.body;
 
-    const user = await userModel.findOne({ username });
+    const user = await userModel.findOne({ $or: [{ email }, { username }] });
 
     if (!user) {
         return res.status(400).json({ message: "Invalid credentials" });
+    }
+
+    if (!user.verified) {
+        return res.status(400).json({ message: "Please verify your email before logging in" });
     }
 
     const isValidPassword = await bcrypt.compare(password, user.password);
@@ -111,7 +136,7 @@ const loginUser = async (req, res) => {
 
     res.status(200).json({
         message: "User logged in successfully",
-        user: { username: user.username, phone: user.phone, dob: user.dob, gender: user.gender },
+        user: { email: user.email, username: user.username, phone: user.phone, dob: user.dob, gender: user.gender },
         accessToken,
     });
 }
@@ -211,11 +236,30 @@ const logoutAll = async (req, res) => {
     res.status(200).json({ message: "User logged out from all devices successfully" });
 }
 
+const verifyEmail = async (req, res) => {
+    const { email, otp } = req.body;
+
+    const otpHash = crypto.createHash("sha256").update(otp).digest("hex");
+
+    const otpDoc = await OTPModel.findOne({ email, otpHash }).populate("user");
+
+    if (!otpDoc) {
+        return res.status(400).json({ message: "Invalid OTP" });
+    }
+
+    const user = await userModel.findByIdAndUpdate(otpDoc.user._id, { verified: true });
+
+    await OTPModel.deleteMany({ user: otpDoc.user._id });
+
+    res.status(200).json({ message: "Email verified successfully" });
+}
+
 module.exports = {
     registerUser,
     loginUser,
     getUser,
     refreshToken,
     logoutUser,
-    logoutAll
+    logoutAll,
+    verifyEmail
 }
